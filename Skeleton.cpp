@@ -1,7 +1,3 @@
-
-//=============================================================================================
-
-//
 // A beadott program csak ebben a fajlban lehet, a fajl 1 byte-os ASCII karaktereket tartalmazhat, BOM kihuzando.
 // Tilos:
 // - mast "beincludolni", illetve mas konyvtarat hasznalni
@@ -19,8 +15,8 @@
 //
 // NYILATKOZAT
 // ---------------------------------------------------------------------------------------------
-
-// Neptun :
+// Nev    : 
+// Neptun : 
 // ---------------------------------------------------------------------------------------------
 // ezennel kijelentem, hogy a feladatot magam keszitettem, es ha barmilyen segitseget igenybe vettem vagy
 // mas szellemi termeket felhasznaltam, akkor a forrast es az atvett reszt kommentekben egyertelmuen jeloltem.
@@ -37,768 +33,434 @@
 //FELADAT
 
 /*
-Írjon 2D egykerekû bicikli szimulátor programot. 
-A pálya negatív tenziójú explicit(!) Kochanek-Bartels spline, amelynek kontrollpontjait az egér bal gombjának lenyomásával lehet megadni, 
-tetszõleges idõpontban és sorrendben. A bicikli vonalas ábra, forgó, többküllõs kerékkel és vadul pedálozó biciklissel. 
-A kamera ortogonális vetítéssel dolgozik, kezdetben rögzített, majd SPACE hatására a biciklizõt követi. 
-A biciklis a kezdeti kamera két széle között teker fel és alá, amit kb. 5 másodperc alatt tesz meg. 
-A biciklis állandó erõvel teker, amivel a nehézségi erõt és a sebességgel arányos légellenállást küzdi le. 
-A tömeg az izmok erejéhez képest elhanyagolható, így a sebesség gyorsan változhat.
+Készítsen virtuális kaleidoszkópot. A tükörrendszer szabályos sokszög, amelynek az oldalszáma 3-ról indul és az ‘a’ billentyûvel lehet inkrementálni.
+A tükör anyaga arany (‘g’) vagy ezüst (‘s’). 
+A kaleidoszkóp végén legalább három, különbözõ anyagtulajdonságú ellipszoid található, amelyet ambiens+diffúz+Phong-Blinn spekuláris modell szerint veri vissza a fényt. 
+Az ellipszoidokat véletlen irányú erõk érik (Brown mozgás) amit követve mozog.
 
-A távoli háttér egy procedurálisan textúrázott téglalap, ami az égboltot és pozitív tenziójú explicit(!) Kochanek-Bartels spline-nal definiált hegységet ábrázol.
-A távoli háttér nem követi a kamerát a hamis perspektíva érdekében.
+A sima anyagok törésmutatója és kioltási tényezõje az R,G,B hullámhosszokon:
+
+Arany (n/k): 0.17/3.1, 0.35/2.7, 1.5/1.9
+
+Ezüst (n/k) 0.14/4.1, 0.16/2.3, 0.13/3.1
 */
 
-
 #include "framework.h"
+
+struct Material {
+	vec3 ka, kd, ks;
+	float  shininess;
+	bool rough = true;
+	bool reflective = false;
+	Material(vec3 _kd, vec3 _ks, float _shininess) : ka(_kd * M_PI), kd(_kd), ks(_ks) { shininess = _shininess; }
+};
+
+inline vec3 operator/(const vec3& v, const vec3& u) { return vec3(v.x / u.x, v.y / u.y, v.z / u.z); }
+const int maxdepth = 10;
+static int mirrors = 3;
+
+struct Hit {
+	float t;
+	vec3 position, normal;
+	Material * material;
+	Hit() { t = -1; }
+};
+
+struct Ray {
+	vec3 start, dir, reflectionDir;
+	bool out = true;
+	Ray(vec3 _start, vec3 _dir) { start = _start; dir = normalize(_dir); }
+	Ray(vec3 _start, vec3 _dir, bool _out) { start = _start; dir = normalize(_dir); out = _out; }
+};
+
+class Intersectable {
+protected:
+	Material * material;
+public:
+	virtual Hit intersect(const Ray& ray) = 0;
+};
+
+struct Sphere : public Intersectable {
+	vec3 center;
+	float radius;
+
+	Sphere(const vec3& _center, float _radius, Material* _material) {
+		center = _center;
+		radius = _radius;
+		material = _material;
+	}
+	Hit intersect(const Ray& ray) {
+		Hit hit;
+		vec3 dist = ray.start - center;
+		float a = dot(ray.dir, ray.dir);
+		float b = dot(dist, ray.dir) * 2.0;
+		float c = dot(dist, dist) - radius * radius;
+		float discr = b * b - 4.0 * a * c;
+		if (discr < 0) return hit;
+		float sqrt_discr = sqrtf(discr);
+		float t1 = (-b + sqrt_discr) / 2.0 / a;	// t1 >= t2 for sure
+		float t2 = (-b - sqrt_discr) / 2.0 / a;
+		if (t1 <= 0) return hit;
+		hit.t = (t2 > 0) ? t2 : t1;
+		hit.position = ray.start + ray.dir * hit.t;
+		hit.normal = (hit.position - center) * (1.0f / radius);
+		hit.material = material;
+		return hit;
+	}
+};
+
+
+
+class Camera {
+	vec3 eye, lookat, right, up;
+public:
+	void set(vec3 _eye, vec3 _lookat, vec3 vup, double fov) {
+		eye = _eye;
+		lookat = _lookat;
+		vec3 w = eye - lookat;
+		float f = length(w);
+		right = normalize(cross(vup, w)) * f * tan(fov / 2);
+		up = normalize(cross(w, right)) * f * tan(fov / 2);
+	}
+	Ray getRay(int X, int Y) {
+		vec3 dir = lookat + right * (2.0 * (X + 0.5) / windowWidth - 1) + up * (2.0 * (Y + 0.5) / windowHeight - 1) - eye;
+		return Ray(eye, dir);
+	}
+};
+
+struct Light {
+	vec3 direction;
+	vec3 Le;
+	Light(vec3 _direction, vec3 _Le) {
+		direction = normalize(_direction);
+		Le = _Le;
+	}
+};
+
+const float epsilon = 0.0001f;
+
+class Ellipsoid : public Intersectable {
+
+		vec3 center;
+		vec3 radius;
+public:
+		Ellipsoid(const vec3& _center, vec3 _radius, Material* _material) {
+			center = _center;
+			radius = _radius;
+			material = _material;
+		}
+		Hit intersect(const Ray& ray) {
+			Hit hit;
+			vec3 dist = ray.start - center;
+			float a = (ray.dir.x * ray.dir.x / (radius.x*radius.x)) + (ray.dir.y* ray.dir.y / (radius.y*radius.y)) + (ray.dir.z* ray.dir.z / (radius.z*radius.z));
+			float b = ((2.0*ray.dir.x * ray.start.x - 2.0*center.x * ray.dir.x) / (radius.x * radius.x)) +
+				((2.0*ray.dir.y * ray.start.y - 2.0*center.y * ray.dir.y) / (radius.y * radius.y)) +
+				((2.0*ray.dir.z * ray.start.z - 2.0*center.z * ray.dir.z) / (radius.z * radius.z));
+			float c = ((center.x*center.x - 2.0*center.x*ray.start.x + ray.start.x*ray.start.x) / (radius.x*radius.x)) +
+				((center.y*center.y - 2.0*center.y*ray.start.y + ray.start.y*ray.start.y) / (radius.y*radius.y)) +
+				((center.z*center.z - 2.0*center.z*ray.start.z + ray.start.z*ray.start.z) / (radius.z*radius.z)) - 1.0f;
+			float discr = b * b - 4.0 * a * c;
+			if (discr < 0) return hit;
+			float sqrt_discr = sqrtf(discr);
+			float t1 = (-b + sqrt_discr) / 2.0 / a;	// t1 >= t2 for sure
+			float t2 = (-b - sqrt_discr) / 2.0 / a;
+			if (t1 <= 0) return hit;
+			hit.t = (t2 > 0) ? t2 : t1;
+			hit.position = ray.start + ray.dir * hit.t;
+			hit.normal = vec3((hit.position.x - center.x) / (radius.x), (hit.position.y - center.y) / (radius.y), (hit.position.z - center.z) / (radius.z));
+			hit.material = material;
+			return hit;
+		}
+
+		
+};
+
+
+
+
+class Mirror : public Intersectable {
+	vec3 pos;
+	vec3 normal = vec3(1, 0, 0);
+public:
+	Mirror(vec3 _pos, vec3 _normal, Material* _material) {
+		pos = _pos;
+		normal = _normal;
+		material = _material;
+		
+	}
+
+	Hit intersect(const Ray& ray) {
+		Hit hit;
+		float d = dot(normal, ray.dir);
+		if (d == 0)
+			return hit;
+		hit.material = material;
+		hit.normal = normal;
+
+		float x = dot(pos - ray.start, normal) / d;
+		if (x < 0) {
+			return hit;
+		}
+
+		vec3 intersection = ray.dir * x + ray.start;
+
+		hit.position = intersection;
+
+		float t = length(intersection - ray.start);
+
+		hit.t = t;
+
+		return hit;
+
+	}
+
+	
+};
+
+
+
+class Scene {
+	std::vector<Intersectable *> objects;
+	std::vector<Light *> lights;
+	Camera camera;
+	vec3 La;
+	
+public:
+	void build() {
+		vec3 eye = vec3(0, 0, 7), vup = vec3(0, 1, 0), lookat = vec3(0, 0, 0);
+		float fov = 45 * M_PI / 180;
+		camera.set(eye, lookat, vup, fov);
+
+		La = vec3(0.4f, 0.4f, 0.4f);
+		vec3 lightDirection(0, 0, 1), Le(2, 2, 2);
+		lights.push_back(new Light(lightDirection, Le));
+
+		vec3 kdr(0.3f, 0.2f, 0.1f);
+		vec3 kd1(0.7f, 0.2f, 0.1f);
+		vec3 kd2(0.0f, 0.5f, 0.7f);
+		vec3 kd3(0.1f, 0.6f, 0.3f);
+		vec3 kdw(0.0f, 1.0f, 1.0f);
+		vec3 ks(2, 2, 2);
+		Material * wmaterial = new Material(kdw, ks, 50);
+		Material * material = new Material(kd1, ks, 50);
+		Material * material2 = new Material(kd2, ks, 50);
+		Material * material3 = new Material(kd3, ks, 50);
+		Material * rmaterial = new Material(kdr, ks, 50);
+		rmaterial->reflective = true;
+		rmaterial->rough = false;
+		objects.push_back(new Ellipsoid(vec3(0.1f, -0.1f, -1.0f), vec3(0.6, 0.3, 0.2), material2));
+		objects.push_back(new Ellipsoid(vec3(0.0f, 0.0f, 0.0f),  vec3(0.4, 0.2, 0.3), material));
+		objects.push_back(new Ellipsoid(vec3(-0.3f, 0.3f, 1.0f),  vec3(0.3, 0.2, 0.1), material3));
+
+		float rad = 2 * M_PI / mirrors;
+		for(int i = 0; i< mirrors; i++){
+			float deg = i * rad - M_PI / 2;
+			vec3 dir(cos(deg), sin(deg), 0);
+			objects.push_back(new Mirror(dir*0.8f, dir*-1.0f, rmaterial));
+		}
+		
+		
+	}
+
+	void render(std::vector<vec4>& image) {
+		for (int Y = 0; Y < windowHeight; Y++) {
+#pragma omp parallel for
+			for (int X = 0; X < windowWidth; X++) {
+				vec3 color = trace(camera.getRay(X, Y));
+				image[Y * windowWidth + X] = vec4(color.x, color.y, color.z, 1);
+			}
+		}
+	}
+
+	Hit firstIntersect(Ray ray) {
+		Hit bestHit;
+		for (Intersectable * object : objects) {
+			Hit hit = object->intersect(ray); //  hit.t < 0 if no intersection
+			if (hit.t > 0 && (bestHit.t < 0 || hit.t < bestHit.t))  bestHit = hit;
+		}
+		if (dot(ray.dir, bestHit.normal) > 0) bestHit.normal = bestHit.normal * (-1);
+		return bestHit;
+	}
+
+	bool shadowIntersect(Ray ray) {	// for directional lights
+		for (Intersectable * object : objects) if (object->intersect(ray).t > 0) return true;
+		return false;
+	}
+
+	vec3 reflect(vec3 inDir, vec3 normal) {
+		return inDir - normal * dot(normal, inDir) * 2.0f;
+	}
+
+	vec3 Fresnel(vec3 inDir, vec3 normal) {
+		vec3 n(0.17f, 0.35f, 1.5f);
+		vec3 kappa(3.1f, 2.7f, 1.9f);
+		float cosa = -dot(inDir, normal);
+		vec3 one(1, 1, 1);
+		vec3 F0 = ((n - one)*(n - one) + kappa * kappa) / ((n + one)*(n + one) + kappa * kappa);
+
+		return F0 + (one - F0) * pow(1 - cosa, 5);
+	}
+
+	
+
+	vec3 trace(Ray ray, int depth = 0) {
+		if (depth > maxdepth) return La;
+		Hit hit = firstIntersect(ray);
+		if (hit.t < 0) return La;
+		vec3 weight = vec3(1, 1, 1);
+		vec3 outRadiance = hit.material->ka * La;
+		if (hit.material->rough) {
+			for (Light * light : lights) {
+				Ray shadowRay(hit.position + hit.normal * epsilon, light->direction);
+				float cosTheta = dot(hit.normal, light->direction);
+				if (cosTheta > 0 && !shadowIntersect(shadowRay)) {	// shadow computation
+					outRadiance = outRadiance + light->Le * hit.material->kd * cosTheta;
+					vec3 halfway = normalize(-ray.dir + light->direction);
+					float cosDelta = dot(hit.normal, halfway);
+					if (cosDelta > 0) outRadiance = outRadiance + light->Le * hit.material->ks * powf(cosDelta, hit.material->shininess);
+				}
+			}
+		}
+		if (hit.material->reflective) {
+			
+			vec3 reflectionDir = reflect(ray.dir, hit.normal);
+			Ray reflectRay(hit.position + hit.normal * epsilon, reflectionDir, ray.out);
+			outRadiance = outRadiance + trace(reflectRay, depth + 1)*Fresnel(ray.dir, hit.normal);
+		}
+		return outRadiance;
+	}
+
+	void resetMirrors() {
+		for (int i = 0; i < mirrors; i++) {
+			objects.pop_back();
+		}
+	}
+};
+
+
+
+GPUProgram gpuProgram; // vertex and fragment shaders
+Scene scene;
+
+
 // vertex shader in GLSL
-const char * vertexSource = R"(
-    #version 330
+const char *vertexSource = R"(
+	#version 330
     precision highp float;
- 
-    uniform mat4 MVP;            // Model-View-Projection matrix in row-major format
- 
-    layout(location = 0) in vec2 vertexPosition;    // Attrib Array 0
- 
-    void main() {
-        gl_Position = vec4(vertexPosition.x, vertexPosition.y, 0, 1) * MVP;         // transform to clipping space
-    }
+
+	layout(location = 0) in vec2 cVertexPosition;	// Attrib Array 0
+	out vec2 texcoord;
+
+	void main() {
+		texcoord = (cVertexPosition + vec2(1, 1))/2;							// -1,1 to 0,1
+		gl_Position = vec4(cVertexPosition.x, cVertexPosition.y, 0, 1); 		// transform to clipping space
+	}
 )";
 
 // fragment shader in GLSL
-const char * fragmentSource = R"(
-    #version 330
+const char *fragmentSource = R"(
+	#version 330
     precision highp float;
- 
-    uniform vec3 color;
-    out vec4 fragmentColor;        // output that goes to the raster memory as told by glBindFragDataLocation
- 
-    void main() {
-        fragmentColor = vec4(color, 1); // extend RGB to RGBA
-    }
+
+	uniform sampler2D textureUnit;
+	in  vec2 texcoord;			// interpolated texture coordinates
+	out vec4 fragmentColor;		// output that goes to the raster memory as told by glBindFragDataLocation
+
+	void main() {
+		fragmentColor = texture(textureUnit, texcoord); 
+	}
 )";
-bool track = false;
 
-class Camera2D {
-	vec2 wCenter;
-	vec2 wSize;
+class FullScreenTexturedQuad {
+	unsigned int vao;	// vertex array object id and texture id
+	Texture * pTexture;
 public:
-	Camera2D() : wCenter(0, 0), wSize(2, 2) { }
+	void Create(std::vector<vec4>& image) {
+		glGenVertexArrays(1, &vao);	// create 1 vertex array object
+		glBindVertexArray(vao);		// make it active
 
-	mat4 V() { return TranslateMatrix(-wCenter); }
-	mat4 P() { return ScaleMatrix(vec2(2 / wSize.x, 2 / wSize.y)); }
+		unsigned int vbo;		// vertex buffer objects
+		glGenBuffers(1, &vbo);	// Generate 1 vertex buffer objects
 
-	mat4 Vinv() { return TranslateMatrix(wCenter); }
-	mat4 Pinv() { return ScaleMatrix(vec2(wSize.x / 2, wSize.y / 2)); }
-
-	void Zoom(float s) { wSize = wSize * s; }
-	void Pan(vec2 t) { wCenter = wCenter + t; }
-	void Follow(vec2 t) {
-		if (track)
-			wCenter = t;
-	}
-};
-
-
-Camera2D camera;
-
-float tCurrent = 0;
-GPUProgram gpuProgram;
-const int nTesselatedVertices = 1000;
-
-class Body {
-	unsigned int vao;
-	vec2 points[2];
-
-public:
-
-	Body(vec2 &p1, vec2 &p2) {
-		points[0] = p1;
-		points[1] = p2;
-	}
-
-	void Create() {
-		glGenVertexArrays(1, &vao);
-		glBindVertexArray(vao);
-
-		unsigned int vbo;
-
-		glGenBuffers(1, &vbo);
-		glBindBuffer(GL_ARRAY_BUFFER, vbo);
-
-		glBufferData(GL_ARRAY_BUFFER,
-			sizeof(points),
-			points,
-			GL_STATIC_DRAW);
-
+		// vertex coordinates: vbo0 -> Attrib Array 0 -> vertexPosition of the vertex shader
+		glBindBuffer(GL_ARRAY_BUFFER, vbo); // make it active, it is an array
+		float vertexCoords[] = { -1, -1,  1, -1,  1, 1,  -1, 1 };	// two triangles forming a quad
+		glBufferData(GL_ARRAY_BUFFER, sizeof(vertexCoords), vertexCoords, GL_STATIC_DRAW);	   // copy to that part of the memory which is not modified 
 		glEnableVertexAttribArray(0);
+		glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, NULL);     // stride and offset: it is tightly packed
 
-		glVertexAttribPointer(0,
-			2, GL_FLOAT,
-			GL_FALSE,
-			0, NULL);
-	}
-
-	vec2 getp1() { return points[0]; }
-	vec2 getp2() { return points[1]; }
-
-	void Move(float x, float y) {
-		points[0].x = x;
-		points[0].y = y;
+		pTexture = new Texture(windowWidth, windowHeight, image);
 	}
 
 	void Draw() {
-
-
-		mat4 MVPTransform(1.0f, 0.0f, 0.0f, 0.0f,
-			0.0f, 1.0f, 0.0f, 0.0f,
-			0.0f, 0.0f, 1.0f, 0.0f,
-			points[0].x, points[0].y, 0.0f, 1.0f);
-
-
-		int colorLocation = glGetUniformLocation(gpuProgram.getId(), "color");
-		if (colorLocation >= 0) glUniform3f(colorLocation, 1.0f, 0.0f, 0.0f);
-
-		mat4 M = MVPTransform * camera.V()*camera.P();
-
-		M.SetUniform(gpuProgram.getId(), "MVP");
-
-
-		glBindVertexArray(vao);
-		glDrawArrays(GL_LINE_STRIP, 0, 2);
+		glBindVertexArray(vao);	// make the vao and its vbos active playing the role of the data source
+		pTexture->SetUniform(gpuProgram.getId(), "textureUnit");
+		glDrawArrays(GL_TRIANGLE_FAN, 0, 4);	// draw two triangles forming a quad
 	}
 };
 
+FullScreenTexturedQuad fullScreenTexturedQuad;
 
-
-
-class Curve {
-	unsigned int vaoCurve, vboCurve;
-	unsigned int vaoCtrlPoints, vboCtrlPoints;
-
-protected:
-	std::vector<vec4> wCtrlPoints;
-public:
-	Curve() {
-
-		glGenVertexArrays(1, &vaoCurve);
-		glBindVertexArray(vaoCurve);
-
-		glGenBuffers(1, &vboCurve);
-		glBindBuffer(GL_ARRAY_BUFFER, vboCurve);
-
-		glEnableVertexAttribArray(0);
-
-		glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), NULL);
-
-
-		glGenVertexArrays(1, &vaoCtrlPoints);
-		glBindVertexArray(vaoCtrlPoints);
-
-		glGenBuffers(1, &vboCtrlPoints);
-		glBindBuffer(GL_ARRAY_BUFFER, vboCtrlPoints);
-
-		glEnableVertexAttribArray(0);
-		glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), NULL);
-
-
-	}
-
-	virtual vec4 r(float t) { return wCtrlPoints[0]; }
-	virtual vec4 rd(float t) { return wCtrlPoints[0]; }
-	virtual vec4 re(float x) { return wCtrlPoints[0]; }
-	virtual float tStart() { return 0; }
-	virtual float tEnd() { return 1; }
-
-
-
-
-	void swap(vec4 *v1, vec4 *v2) {
-		vec4 temp = *v1;
-		*v1 = *v2;
-		*v2 = temp;
-	}
-
-
-	virtual void AddControlPoint(float cX, float cY) {
-		vec4 wVertex = vec4(cX, cY, 0, 1) * camera.Pinv() * camera.Vinv();
-		wCtrlPoints.push_back(wVertex);
-		for (unsigned int i = 0; i < wCtrlPoints.size() - 0; i++) {
-			int minimum = i;
-			for (unsigned int j = i + 1; j < wCtrlPoints.size(); j++)
-				if (wCtrlPoints[j].x < wCtrlPoints[minimum].x) {
-					minimum = j;
-				}
-			swap(&wCtrlPoints[minimum], &wCtrlPoints[i]);
-		}
-
-	}
-
-
-
-	void Draw() {
-		mat4 VPTransform = camera.V() * camera.P();
-
-		VPTransform.SetUniform(gpuProgram.getId(), "MVP");
-
-		int colorLocation = glGetUniformLocation(gpuProgram.getId(), "color");
-
-
-
-		if (wCtrlPoints.size() > 0) {
-			glBindVertexArray(vaoCtrlPoints);
-			glBindBuffer(GL_ARRAY_BUFFER, vboCtrlPoints);
-			glBufferData(GL_ARRAY_BUFFER, wCtrlPoints.size() * 4 * sizeof(float), &wCtrlPoints[0], GL_DYNAMIC_DRAW);
-			if (colorLocation >= 0) glUniform3f(colorLocation, 0, 0, 0);
-			glPointSize(1.0f);
-			glDrawArrays(GL_POINTS, 0, wCtrlPoints.size());
-		}
-
-		if (wCtrlPoints.size() >= 2) {
-			std::vector<float> vertexData;
-			float xt = -1.0f;
-			for (int i = 0; i < nTesselatedVertices; i++) {
-				float y = re(xt).y;
-				vertexData.push_back(xt);
-				vertexData.push_back(y);
-				vertexData.push_back(xt);
-				vertexData.push_back(-1.0f);
-
-				xt += 0.002f;
-
-			}
-
-			glBindVertexArray(vaoCurve);
-			glBindBuffer(GL_ARRAY_BUFFER, vboCurve);
-			glBufferData(GL_ARRAY_BUFFER, vertexData.size() * sizeof(float), &vertexData[0], GL_DYNAMIC_DRAW);
-			if (colorLocation >= 0) glUniform3f(colorLocation, 0, 0, 0);
-			glDrawArrays(GL_LINE_STRIP, 0, 2 * nTesselatedVertices);
-
-
-
-
-
-		}
-	}
-};
-
-
-
-class CatmullRom : public Curve {
-	std::vector<float> ts;
-
-	vec4 Hermite(vec4 p0, vec4 v0, float t0, vec4 p1, vec4 v1, float t1, float t) {
-
-		vec4 a0 = p0;
-		vec4 a1 = v0;
-		vec4 a2 = (((p1 - p0) * 3)*(1.0 / ((t1 - t0)*(t1 - t0)))) - ((v1 + (v0 * 2))*(1.0 / (t1 - t0)));
-		vec4 a3 = (((p0 - p1) * 2)*(1.0 / ((t1 - t0)*(t1 - t0)*(t1 - t0)))) + ((v1 + (v0))*(1.0 / ((t1 - t0)*(t1 - t0))));
-
-		vec4 rt = (a3*((t - t0)*(t - t0)*(t - t0))) + (a2*((t - t0)*(t - t0))) + (a1*((t - t0))) + a0;
-
-
-
-		return rt;
-	}
-
-
-
-
-
-	vec4 DHermite(vec4 p0, vec4 v0, float t0, vec4 p1, vec4 v1, float t1, float t) {
-		vec4 a0 = p0;
-		vec4 a1 = v0;
-		vec4 a2 = (((p1 - p0) * 3)*(1.0 / ((t1 - t0)*(t1 - t0)))) - ((v1 + (v0 * 2))*(1.0 / (t1 - t0)));
-		vec4 a3 = (((p0 - p1) * 2)*(1.0 / ((t1 - t0)*(t1 - t0)*(t1 - t0)))) + ((v1 + (v0))*(1.0 / ((t1 - t0)*(t1 - t0))));
-
-		vec4 rt = (a3*(t - t0)*(t - t0) * 3) + (a2*(t - t0) * 2) + a1;
-		return rt;
-	}
-
-public:
-	void AddControlPoint(float cX, float cY) {
-		ts.push_back((float)wCtrlPoints.size());
-		Curve::AddControlPoint(cX, cY);
-	}
-	float tStart() { return ts[0]; }
-	float tEnd() { return ts[wCtrlPoints.size() - 1]; }
-
-
-
-	vec4 ve(int i) {
-		vec4 tag1 = (wCtrlPoints[i + 1] - wCtrlPoints[i])*(1.0 / (wCtrlPoints[i + 1].x - wCtrlPoints[i].x));
-		vec4 tag2 = (wCtrlPoints[i] - wCtrlPoints[i - 1])*(1.0 / (wCtrlPoints[i].x - wCtrlPoints[i - 1].x));
-		vec4 vi = (tag1 + tag2)*(0.3f)*(-1);
-		return vi;
-	}
-
-	vec4 re(float x) {
-		vec4 v0;
-		vec4 v1;
-
-		for (int i = 0; i < wCtrlPoints.size() - 1; i++) {
-			if (wCtrlPoints[i].x <= x && x <= wCtrlPoints[i + 1].x) {
-				if (i == 0) {
-					v0 = wCtrlPoints[1] - wCtrlPoints[0];
-					v1 = ve(i + 1);
-
-				}
-				else {
-					v0 = ve(i);
-					if (i == wCtrlPoints.size() - 2)
-						v1 = wCtrlPoints[i + 1] - wCtrlPoints[i];
-					else v1 = ve(i + 1);
-
-				}
-				return Hermite(wCtrlPoints[i], v0, wCtrlPoints[i].x, wCtrlPoints[i + 1], v1, wCtrlPoints[i + 1].x, x);
-
-			}
-
-		}
-
-		return vec4(0, 0, 0, 0);
-	}
-
-
-
-};
-
-
-class Leg {
-	unsigned int vao;
-	unsigned int vbo;
-	vec2 points[3];
-	float l1;
-	float l2;
-	int dis = 1;
-
-public:
-
-	Leg(vec2 p1, vec2 p2, vec2 p3) {
-		points[0] = p1;
-		points[1] = p2;
-		points[2] = p3;
-
-		l1 = abs(length(p1) - length(p2));
-		l2 = abs(length(p2) - length(p3));
-	}
-
-	void Move(float x, float y) {
-		points[0].x = x;
-		points[0].y = y;
-	}
-
-	void printl() {
-		printf("\n*%.2f*\n", l1);
-		printf("\n*%.2f*\n", l2);
-	}
-
-	void setdis() { dis *= -1; }
-
-	void disort() {
-		if (dis == 1) {
-			points[0].x += 0.005f;
-		}
-		else if (dis == -1) {
-			points[0].x -= 0.005f;
-		}
-	}
-
-	void Create() {
-		glGenVertexArrays(1, &vao);
-		glBindVertexArray(vao);
-
-
-		glGenBuffers(1, &vbo);
-		glBindBuffer(GL_ARRAY_BUFFER, vbo);
-
-		glBufferData(GL_ARRAY_BUFFER,
-			sizeof(points),
-			points,
-			GL_DYNAMIC_DRAW);
-
-		glEnableVertexAttribArray(0);
-
-		glVertexAttribPointer(0,
-			2, GL_FLOAT,
-			GL_FALSE,
-			0, NULL);
-	}
-	void Draw() {
-
-
-		mat4 MVPTransform(1.0f, 0.0f, 0.0f, 0.0f,
-			0.0f, 1.0f, 0.0f, 0.0f,
-			0.0f, 0.0f, 1.0f, 0.0f,
-			points[0].x, points[0].y, 0.0f, 1.0f);
-
-
-		int colorLocation = glGetUniformLocation(gpuProgram.getId(), "color");
-		if (colorLocation >= 0) glUniform3f(colorLocation, 1.0f, 0.0f, 0.0f);
-
-		mat4 M = MVPTransform * camera.V()*camera.P();
-
-		M.SetUniform(gpuProgram.getId(), "MVP");
-
-
-
-		glBindVertexArray(vao);
-		glDrawArrays(GL_LINE_STRIP, 0, 3);
-	}
-
-};
-
-
-class Head {
-	unsigned int vao;
-	unsigned int vbo;
-	float radius = 0.05f;
-	vec2 vertices[32 + 2];
-	float center[2];
-public:
-
-	Head(float x, float y) {
-		center[0] = x;
-		center[1] = y;
-		vertices[0] = vec2(center[0] + radius * cosf(float(0) / float(32)*float(2)*float(M_PI)), center[1] + radius * sinf(float(0) / float(32)*float(2)*float(M_PI)));
-		for (int i = 1; i < 32 + 2; i++) {
-			vertices[i] = vec2(center[0] + radius * cosf(float(i) / float(32)*float(2)*float(M_PI)), center[1] + radius * sinf(float(i) / float(32)*float(2)*float(M_PI)));
-		}
-	}
-	void Create() {
-		glGenVertexArrays(1, &vao);
-		glBindVertexArray(vao);
-
-
-		glGenBuffers(1, &vbo);
-		glBindBuffer(GL_ARRAY_BUFFER, vbo);
-
-		glBufferData(GL_ARRAY_BUFFER,
-			sizeof(vertices),
-			vertices,
-			GL_DYNAMIC_DRAW);
-
-		glEnableVertexAttribArray(0);
-
-		glVertexAttribPointer(0,
-			2, GL_FLOAT,
-			GL_FALSE,
-			0, NULL);
-	}
-
-	void Move(float x, float y) {
-		center[0] = x;
-		center[1] = y;
-	}
-
-
-
-	void Draw() {
-		mat4 MVPTransform(1.0f, 0.0f, 0.0f, 0.0f,
-			0.0f, 1.0f, 0.0f, 0.0f,
-			0.0f, 0.0f, 1.0f, 0.0f,
-			center[0], center[1], 0.0f, 1.0f);
-
-
-
-		mat4 M = MVPTransform * camera.V()*camera.P();
-
-
-		int colorLocation = glGetUniformLocation(gpuProgram.getId(), "color");
-		if (colorLocation >= 0) glUniform3f(colorLocation, 1.0f, 1.0f, 0.0f);
-
-		M.SetUniform(gpuProgram.getId(), "MVP");
-		glBindVertexArray(vao);
-		glDrawArrays(GL_LINE_STRIP, 0, 32 + 1);
-
-
-
-	}
-
-
-
-
-};
-
-class Circle {
-	unsigned int vao;
-	unsigned int vbo;
-	int direction = 1;
-	float radius;
-	float force = 600;
-	vec2 vertices[72 + 1];
-	float center[2];
-	vec2 translatepos;
-
-	vec2 wTranslate;
-	float phi = 0.0005;
-
-
-public:
-
-	Circle(float radius = float(0.1), float rX = 0.0, float rY = 0.0) {
-		center[0] = rX;
-		center[1] = rY;
-		this->radius = radius;
-		vertices[0] = vec2(center[0] + radius * cosf(float(0) / float(32)*float(2)*float(M_PI)), center[1] + radius * sinf(float(0) / float(32)*float(2)*float(M_PI)));
-		for (int i = 1; i < 72 + 1; i++) {
-
-			vertices[i] = vec2(center[0] + radius * cosf(float(i) / float(32)*float(2)*float(M_PI)), center[1] + radius * sinf(float(i) / float(32)*float(2)*float(M_PI)));
-			if (i == 1 || i == 9 || i == 17 || i == 25) {
-
-				vertices[i + 1] = vec2(center[0], center[1]);
-				vertices[i + 2] = vec2(center[0] + radius * cosf(float(i) / float(32)*float(2)*float(M_PI)), center[1] + radius * sinf(float(i) / float(32)*float(2)*float(M_PI)));
-				i++;
-			}
-			else {
-				vertices[i + 1] = vec2(center[0] + radius * cosf(float(i) / float(32)*float(2)*float(M_PI)), center[1] + radius * sinf(float(i) / float(32)*float(2)*float(M_PI)));
-				i++;
-			}
-
-		}
-
-	}
-
-	vec2 gettr() { return translatepos; }
-	vec2 getv() { return vertices[3]; }
-	float getphi() { return phi; }
-	void Create() {
-		glGenVertexArrays(1, &vao);
-		glBindVertexArray(vao);
-
-
-
-		glGenBuffers(1, &vbo);
-		glBindBuffer(GL_ARRAY_BUFFER, vbo);
-
-		glBufferData(GL_ARRAY_BUFFER,
-			sizeof(vertices),
-			vertices,
-			GL_DYNAMIC_DRAW);
-
-		glEnableVertexAttribArray(0);
-
-		glVertexAttribPointer(0,
-			2, GL_FLOAT,
-			GL_FALSE,
-			0, NULL);
-
-
-
-	}
-
-	void Animate(Curve *c) {
-
-		if (center[0] >= 0.9f) {
-			direction *= -1;
-
-		}
-		if (center[0] <= -0.9f) {
-			direction *= -1;
-
-		}
-
-
-		vec2 before = vec2(center[0] - 0.05f, c->re(center[0] - 0.05f).y);
-
-		vec2 after = vec2(center[0] + 0.05f, c->re(center[0] + 0.1f).y);
-
-		vec2 diff = after - before;
-		float alpha = atan(diff.y / diff.x);
-		float xg = diff.x * (-force + (50 * 9.81*sin(alpha)));
-
-		phi = (xg / 100000) / radius;
-		Rotate();
-
-		if (direction == 1) {
-			center[0] -= xg / 100000;
-
-		}
-		else if (direction == -1) {
-			force *= -1;
-			center[0] += xg / 100000;
-
-		}
-
-
-		diff = vec2(diff.x / sqrt(diff.x * diff.x + diff.y * diff.y), diff.y / sqrt(diff.x * diff.x + diff.y * diff.y));
-		vec2 normal = vec2(diff.y, -diff.x);
-		translatepos = vec2(center[0] - normal.x * radius, c->re(center[0]).y - normal.y * radius);
-
-
-	}
-
-	void Rotate() {
-		for (int i = 0; i < 73; i++)
-		{
-			vec4 newPos = vec4(vertices[i].x, vertices[i].y, 0, 1)*mat4(cosf(phi), sinf(phi), 0, 0,
-				-sinf(phi), cosf(phi), 0, 0,
-				0, 0, 1, 0,
-				0, 0, 0, 1);
-			vertices[i].x = newPos.x;
-			vertices[i].y = newPos.y;
-
-			glBindBuffer(GL_ARRAY_BUFFER, vbo);
-
-			glBufferData(GL_ARRAY_BUFFER,
-				sizeof(vertices),
-				vertices,
-				GL_DYNAMIC_DRAW);
-
-		}
-	}
-
-	void Move(float x, float y) {
-		center[0] = x;
-		center[1] = y;
-	}
-
-	float getr() { return length(vertices[32]); }
-
-	void Draw() {
-		mat4 MVPTransform(1.0f, 0.0f, 0.0f, 0.0f,
-			0.0f, 1.0f, 0.0f, 0.0f,
-			0.0f, 0.0f, 1.0f, 0.0f,
-			0.0f, 0.0f, 0.0f, 1.0f);
-
-		mat4 Mrotate(cosf(phi), sinf(phi), 0, 0,
-			-sinf(phi), cosf(phi), 0, 0,
-			0, 0, 1, 0,
-			0, 0, 0, 1);
-
-		mat4 M = TranslateMatrix(vec3(translatepos.x, translatepos.y, 0.0f)) *camera.V()*camera.P();
-
-
-		int colorLocation = glGetUniformLocation(gpuProgram.getId(), "color");
-		if (colorLocation >= 0) glUniform3f(colorLocation, 1.0f, 1.0f, 0.0f);
-
-		M.SetUniform(gpuProgram.getId(), "MVP");
-		glBindVertexArray(vao);
-		glDrawArrays(GL_LINES, 0, 72 + 1);
-
-
-
-
-	}
-
-};
-
-
-Curve * curve;
-Circle c;
-vec2 * pos = new vec2(1.0f, 5.0f);
-vec2 p1 = vec2(0.0f, 0.35f);
-vec2 p2 = vec2(0.0f, 0.1f);
-vec4 N;
-vec4 T;
-Body * b = new Body(p1, p2);
-Head * h;
-Leg * l = new Leg(vec2(0.0f, 0.1f), vec2(0.1f, 0.05f), vec2(0.0f, 0.03f));
-float xc = 0.0;
-float yc = 0.0;
-
-
-
+// Initialization, create an OpenGL context
 void onInitialization() {
-	printf("%.2f", pos->x);
-	printf("%.2f", pos->y);
-
 	glViewport(0, 0, windowWidth, windowHeight);
-	glLineWidth(2.0f);
+	scene.build();
 
-	curve = new CatmullRom();
-	curve->AddControlPoint(-1.0f, 0.75f);
-	curve->AddControlPoint(0.0f, 0.0f);
-	curve->AddControlPoint(1.0f, 0.5f);
-	c.Create();
-	b->Create();
-	h = new Head(b->getp1().x, b->getp1().y + 0.05);
-	h->Create();
-	l->Create();
-	l->printl();
+	std::vector<vec4> image(windowWidth * windowHeight);
+	long timeStart = glutGet(GLUT_ELAPSED_TIME);
+	scene.render(image);
+	long timeEnd = glutGet(GLUT_ELAPSED_TIME);
+	printf("Rendering time: %d milliseconds\n", (timeEnd - timeStart));
+	fullScreenTexturedQuad.Create(image);
 
-
-
-	gpuProgram.Create(vertexSource, fragmentSource, "outColor");
+	// create program for the GPU
+	gpuProgram.Create(vertexSource, fragmentSource, "fragmentColor");
 }
 
+// Window has become invalid: Redraw
 void onDisplay() {
-	glClearColor(0.1, 0.5, 1, 0);
-	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-	c.Draw();
-	curve->Draw();
-	b->Draw();
-	h->Draw();
-	l->Draw();
-	glutSwapBuffers();
+	fullScreenTexturedQuad.Draw();
+	glutSwapBuffers();									// exchange the two buffers
 }
 
-
+// Key of ASCII code pressed
 void onKeyboard(unsigned char key, int pX, int pY) {
-	if (key == ' ')
-		track = true;
-	else if (key == 'd')
-		camera.Pan(vec2(-0.05f, 0.0f));
+	if (key == 'a') {
+		scene.resetMirrors();
+		mirrors++;
+		glViewport(0, 0, windowWidth, windowHeight);
+		scene.build();
+
+		std::vector<vec4> image(windowWidth * windowHeight);
+		long timeStart = glutGet(GLUT_ELAPSED_TIME);
+		scene.render(image);
+		long timeEnd = glutGet(GLUT_ELAPSED_TIME);
+		printf("Rendering time: %d milliseconds\n", (timeEnd - timeStart));
+		fullScreenTexturedQuad.Create(image);
+		
+	}
 	glutPostRedisplay();
 }
 
-
+// Key of ASCII code released
 void onKeyboardUp(unsigned char key, int pX, int pY) {
-
+	
 }
 
-int pickedControlPoint = -1;
-
+// Mouse click event
 void onMouse(int button, int state, int pX, int pY) {
-	if (button == GLUT_LEFT_BUTTON && state == GLUT_DOWN) {
-		float cX = 2.0f * pX / windowWidth - 1;
-		float cY = 1.0f - 2.0f * pY / windowHeight;
-		curve->AddControlPoint(cX, cY);
-		glutPostRedisplay();
-	}
-	if (button == GLUT_RIGHT_BUTTON && state == GLUT_DOWN) {
-		float cX = 2.0f * pX / windowWidth - 1;
-		float cY = 1.0f - 2.0f * pY / windowHeight;
-		glutPostRedisplay();
-	}
-	if (button == GLUT_RIGHT_BUTTON && state == GLUT_UP) {
-
-	}
-
-	if (button == GLUT_MIDDLE_BUTTON && state == GLUT_DOWN) {
-		float cX = 2.0f * pX / windowWidth - 1;
-		float cY = 1.0f - 2.0f * pY / windowHeight;
-		l->setdis();
-
-		glutPostRedisplay();
-	}
 }
 
-
+// Move mouse with key pressed
 void onMouseMotion(int pX, int pY) {
-	float cX = 2.0f * pX / windowWidth - 1;
-	float cY = 1.0f - 2.0f * pY / windowHeight;
 }
 
-
+// Idle event indicating that some time elapsed: do animation here
 void onIdle() {
-	static float tend = 0;
-	const float dt = 0.01;
-	float tstart = tend;
-	tend = glutGet(GLUT_ELAPSED_TIME) / 1000.0f;
-	xc += 0.00001f;
-	yc += 0.00001f;
-	c.Animate(curve);
-	b->Move(c.gettr().x, c.gettr().y);
-	h->Move(b->getp1().x, b->getp1().y);
-	l->Move(b->getp1().x, b->getp1().y);
-	camera.Follow(b->getp1());
-	for (float t = tstart; t < tend; t += dt) {
-		float Dt = fmin(dt, tend - t);
+	float t = glutGet(GLUT_ELAPSED_TIME) / 1000.0f;
+	if ((int)t % 1 == 0) {
+		//scene.animObj();
+		//printf("\n plez");
 	}
 	glutPostRedisplay();
-
-	//objects.push_back(new Mirror(vec3(-1.0f, 0.0f,0.0f), vec3(1.0f,-1.0f,0.0f), rmaterial));
-		//objects.push_back(new Mirror(vec3(1.0f, 0.0f, 0.0f), vec3(-1.0f, -1.0f, 0.0f), rmaterial));
-		//objects.push_back(new Mirror(vec3(0.0f, -1.0f, 0.0f), vec3(0.0f, -1.0f, 0.0f), rmaterial));
 }
